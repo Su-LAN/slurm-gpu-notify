@@ -4,109 +4,146 @@
 # remote/gpu_report.sh.tmpl. Do NOT edit this copy on the cluster — edit the
 # template in the repo and re-run `sgn-monitor-install`.
 #
-# Runs on the cluster login node (via crontab, hourly). Emails a mobile-friendly
-# status report for the invoking user's Slurm jobs:
-#   • RUNNING jobs → GPU utilisation + memory + remaining walltime
-#   • PENDING jobs → scheduler's estimated start / approximate wait
-# Set SGN_NO_MAIL=1 to print to stdout without sending mail (used by sgn-status).
+# Runs hourly (crontab) on the cluster login node. Emails an HTML table report
+# of the user's Slurm jobs (RUNNING → GPU util/mem + time left; PENDING → ETA).
+# Set SGN_NO_MAIL=1 to print the plain-text version to stdout (used by sgn-status).
 # ─────────────────────────────────────────────────────────────────────────────
 @SLURM_PATH_LINE@
 MAILTO="@EMAIL@"
 GPU_STAT_VIA="@GPU_STAT_VIA@"
+SENDMAIL="$(command -v sendmail 2>/dev/null || echo /usr/sbin/sendmail)"
 ME="$(whoami)"
 NOW="$(date '+%Y-%m-%d %H:%M %Z')"
-OUT="$(mktemp)"
+HOST="$(hostname)"
+TXT="$(mktemp)"; ROWS="$(mktemp)"
 
-fmt_gpu() {   # reads `index,name,util,mem_used,mem_total` CSV rows on stdin
-  while IFS=',' read -r idx name util mu mt; do
-    idx="$(echo "$idx" | xargs)"; name="$(echo "$name" | xargs)"
-    util="$(echo "$util" | xargs)"; mu="$(echo "$mu" | xargs)"; mt="$(echo "$mt" | xargs)"
-    [ -z "$idx" ] && continue
-    name="${name#NVIDIA }"                       # shorten for narrow screens
-    if [ "$util" = "[N/A]" ]; then u="N/A (MIG)"; else u="${util}%"; fi
-    pct=""; [ -n "$mt" ] && [ "$mt" -gt 0 ] 2>/dev/null && pct=" ($((mu*100/mt))%)"
-    echo "   GPU #${idx} ${name}"
-    echo "   util ${u}, mem ${mu}/${mt} MiB${pct}"
-  done
-}
+hm()  { printf '%dh%02dm' $(( $1/3600 )) $(( ($1%3600)/60 )); }   # secs -> 4h05m
+gb()  { echo $(( ($1 + 512) / 1024 )); }                          # MiB -> rounded GiB
+esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }           # html-escape stdin
 
-report_gpu_util() {   # $1 = jobid
+gpu_raw() {   # $1=jobid -> CSV "index,name,util,mem_used,mem_total"
   local jid="$1" idx
   case "$GPU_STAT_VIA" in
-    none)
-      echo "   (GPU utilisation reporting disabled)" ;;
-    srun)
-      timeout 45 srun --jobid="$jid" --overlap -n1 \
-        nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total \
-        --format=csv,noheader,nounits 2>/dev/null | fmt_gpu ;;
-    *)  # login_idx: query the exact GPU index Slurm assigned, on the login node
-      idx="$(scontrol show job "$jid" -d 2>/dev/null | grep -oP 'IDX:\K[0-9,]+' | head -1)"
-      if [ -n "$idx" ]; then
-        nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total \
-          --format=csv,noheader,nounits --id="$idx" 2>/dev/null | fmt_gpu
-      else
-        echo "   (could not determine GPU index for job $jid)"
-      fi ;;
+    none) : ;;
+    srun) timeout 45 srun --jobid="$jid" --overlap -n1 \
+            nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total \
+            --format=csv,noheader,nounits 2>/dev/null ;;
+    *)    idx="$(scontrol show job "$jid" -d 2>/dev/null | grep -oP 'IDX:\K[0-9,]+' | head -1)"
+          [ -n "$idx" ] && nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total \
+            --format=csv,noheader,nounits --id="$idx" 2>/dev/null ;;
   esac
 }
 
-secs_from_slurm_time() {   # converts D-HH:MM:SS / HH:MM:SS / MM:SS to seconds
-  echo "$1" | awk -F'[-:]' '{n=NF;s=$n;m=(n>=2?$(n-1):0);h=(n>=3?$(n-2):0);d=(n>=4?$(n-3):0);print ((d*24+h)*60+m)*60+s}'
+gpu_summary() {   # $1=jobid -> "#3 A100-80GB · util 100% · 73/80 GB" (one line per gpu)
+  gpu_raw "$1" | while IFS=',' read -r idx name util mu mt; do
+    idx="$(echo "$idx" | xargs)"; name="$(echo "$name" | xargs | sed 's/^NVIDIA //; s/-SXM4//')"
+    util="$(echo "$util" | xargs)"; mu="$(echo "$mu" | xargs)"; mt="$(echo "$mt" | xargs)"
+    [ -z "$idx" ] && continue
+    if [ "$util" = "[N/A]" ]; then u="N/A (MIG)"; else u="${util}%"; fi
+    m=""; [ -n "$mt" ] && [ "$mt" -gt 0 ] 2>/dev/null && m=" · $(gb "$mu")/$(gb "$mt") GB"
+    echo "#${idx} ${name} · util ${u}${m}"
+  done
 }
-hm() { printf '%dh%02dm' $(( $1/3600 )) $(( ($1%3600)/60 )); }   # seconds -> "4h05m"
 
+# ---- gather jobs -----------------------------------------------------------
 JOBS="$(squeue --me -h -o '%i|%j|%T' 2>/dev/null)"
 RUN_N="$(printf '%s\n' "$JOBS" | awk -F'|' '$3=="RUNNING"' | grep -c . || true)"
 PEND_N="$(printf '%s\n' "$JOBS" | awk -F'|' '$3=="PENDING"' | grep -c . || true)"
 if [ -z "$JOBS" ]; then SUMMARY="no jobs"; else SUMMARY="${RUN_N} running, ${PEND_N} pending"; fi
 
-{
-  echo "GPU report — ${ME}"
-  echo "${NOW} · $(hostname)"
-  if [ -z "$JOBS" ]; then
-    echo ""
-    echo "No jobs in the queue right now."
-  else
-    while IFS='|' read -r jid jname jstate; do
-      [ -z "$jid" ] && continue
-      echo ""
-      echo "● ${jid} ${jname} · ${jstate}"
-      if [ "$jstate" = "RUNNING" ]; then
-        rt="$(squeue -j "$jid" -h -o '%M' 2>/dev/null)"
-        tl="$(squeue -j "$jid" -h -o '%l' 2>/dev/null)"
-        report_gpu_util "$jid"
-        us="$(secs_from_slurm_time "$rt")"; ls="$(secs_from_slurm_time "$tl")"
-        if [ -n "$us" ] && [ -n "$ls" ]; then
-          rem=$((ls-us)); [ $rem -lt 0 ] && rem=0
-          echo "   ran $(hm "$us") of $(hm "$ls"), $(hm "$rem") left"
-        else
-          echo "   runtime ${rt} / ${tl}"
-        fi
-      elif [ "$jstate" = "PENDING" ]; then
-        reason="$(squeue -j "$jid" -h -o '%r' 2>/dev/null)"
-        start="$(squeue --start -j "$jid" -h -o '%S' 2>/dev/null)"
-        echo "   reason: ${reason}"
-        if [ -n "$start" ] && [ "$start" != "N/A" ]; then
-          secs=$(( $(date -d "$start" +%s 2>/dev/null) - $(date +%s) ))
-          if [ "$secs" -gt 0 ] 2>/dev/null; then
-            echo "   ETA: ~$(hm "$secs") (starts $start)"
-          else
-            echo "   ETA: starting imminently"
-          fi
-        else
-          echo "   ETA: unknown (resources busy)"
-        fi
-      else
-        echo "   (state ${jstate})"
-      fi
-    done <<< "$JOBS"
-  fi
-  echo ""
-  echo "— slurm-gpu-notify · hourly"
-} > "$OUT"
+# header for the plain-text version
+{ echo "GPU report — ${ME}"; echo "${NOW} · ${HOST} · ${SUMMARY}"; } > "$TXT"
 
-if [ -z "${SGN_NO_MAIL:-}" ]; then
-  mail -s "[GPU] ${ME}: ${SUMMARY}" "$MAILTO" < "$OUT"
+i=0
+if [ -n "$JOBS" ]; then
+  while IFS='|' read -r jid jname jstate; do
+    [ -z "$jid" ] && continue
+    i=$((i+1)); [ $((i%2)) -eq 0 ] && bg="#fafafb" || bg="#ffffff"
+    case "$jstate" in
+      RUNNING)  st_emoji="✅"; st_color="#1a7f37";;
+      PENDING)  st_emoji="⏳"; st_color="#9a6700";;
+      *)        st_emoji="•";  st_color="#555";;
+    esac
+
+    if [ "$jstate" = "RUNNING" ]; then
+      rt="$(squeue -j "$jid" -h -o '%M' 2>/dev/null)"; tl="$(squeue -j "$jid" -h -o '%l' 2>/dev/null)"
+      gsum="$(gpu_summary "$jid")"; [ -z "$gsum" ] && gsum="(no GPU info)"
+      us="$(echo "$rt" | awk -F'[-:]' '{n=NF;s=$n;m=(n>=2?$(n-1):0);h=(n>=3?$(n-2):0);d=(n>=4?$(n-3):0);print ((d*24+h)*60+m)*60+s}')"
+      ls="$(echo "$tl" | awk -F'[-:]' '{n=NF;s=$n;m=(n>=2?$(n-1):0);h=(n>=3?$(n-2):0);d=(n>=4?$(n-3):0);print ((d*24+h)*60+m)*60+s}')"
+      if [ -n "$us" ] && [ -n "$ls" ]; then rem=$((ls-us)); [ $rem -lt 0 ] && rem=0; tcol="$(hm "$rem") left"; else tcol="${rt} / ${tl}"; fi
+      gcol="$gsum"
+    else  # PENDING / other
+      reason="$(squeue -j "$jid" -h -o '%r' 2>/dev/null)"; start="$(squeue --start -j "$jid" -h -o '%S' 2>/dev/null)"
+      gcol="—"
+      if [ -n "$start" ] && [ "$start" != "N/A" ]; then
+        secs=$(( $(date -d "$start" +%s 2>/dev/null) - $(date +%s) ))
+        if [ "$secs" -gt 0 ] 2>/dev/null; then tcol="ETA ~$(hm "$secs")"; else tcol="starting…"; fi
+      else
+        tcol="ETA unknown ($reason)"
+      fi
+    fi
+
+    # plain-text block
+    {
+      echo ""
+      echo "${st_emoji} ${jid} ${jname} · ${jstate}"
+      printf '%s\n' "$gcol" | sed 's/^/   /'
+      echo "   ${tcol}"
+    } >> "$TXT"
+
+    # html row
+    jid_e="$(printf '%s' "$jid" | esc)"; jname_e="$(printf '%s' "$jname" | esc)"
+    gcol_e="$(printf '%s' "$gcol" | esc | sed ':a;N;$!ba;s/\n/<br>/g')"
+    tcol_e="$(printf '%s' "$tcol" | esc)"
+    cat >> "$ROWS" <<HROW
+<tr style="background:${bg}">
+<td style="padding:7px 9px;border-bottom:1px solid #eee;white-space:nowrap">${st_emoji} <span style="color:${st_color};font-weight:600">${jstate}</span></td>
+<td style="padding:7px 9px;border-bottom:1px solid #eee"><b>${jid_e}</b><br><span style="color:#777;font-size:12px">${jname_e}</span></td>
+<td style="padding:7px 9px;border-bottom:1px solid #eee">${gcol_e}</td>
+<td style="padding:7px 9px;border-bottom:1px solid #eee;white-space:nowrap">${tcol_e}</td>
+</tr>
+HROW
+  done <<< "$JOBS"
+else
+  echo "" >> "$TXT"; echo "No jobs in the queue right now." >> "$TXT"
 fi
-cat "$OUT"
-rm -f "$OUT"
+echo "" >> "$TXT"; echo "— slurm-gpu-notify · hourly" >> "$TXT"
+
+# ---- output ----------------------------------------------------------------
+if [ -n "${SGN_NO_MAIL:-}" ]; then
+  cat "$TXT"; rm -f "$TXT" "$ROWS"; exit 0
+fi
+
+if [ -n "$JOBS" ]; then
+  BODY_INNER="<table role=\"presentation\" style=\"border-collapse:collapse;width:100%;font-size:13px\">
+<tr style=\"background:#f4f4f7\">
+<th align=\"left\" style=\"padding:7px 9px;border-bottom:2px solid #e2e2e8\">State</th>
+<th align=\"left\" style=\"padding:7px 9px;border-bottom:2px solid #e2e2e8\">Job</th>
+<th align=\"left\" style=\"padding:7px 9px;border-bottom:2px solid #e2e2e8\">GPU · util · mem</th>
+<th align=\"left\" style=\"padding:7px 9px;border-bottom:2px solid #e2e2e8\">Time / ETA</th>
+</tr>
+$(cat "$ROWS")
+</table>"
+else
+  BODY_INNER="<p style=\"color:#555\">No jobs in the queue right now.</p>"
+fi
+
+{
+  echo "To: ${MAILTO}"
+  echo "Subject: [GPU] ${ME}: ${SUMMARY}"
+  echo "MIME-Version: 1.0"
+  echo "Content-Type: text/html; charset=UTF-8"
+  echo "Content-Transfer-Encoding: 8bit"
+  echo ""
+  cat <<HTML
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#1a1a1a;max-width:580px;margin:0 auto;padding:4px">
+  <h2 style="margin:0 0 2px;font-size:17px">🖥️ GPU report — ${ME}</h2>
+  <div style="color:#777;font-size:12px;margin:0 0 12px">${NOW} · ${HOST} · ✅ ${RUN_N} running · ⏳ ${PEND_N} pending</div>
+  ${BODY_INNER}
+  <div style="color:#aaa;font-size:11px;margin-top:12px">— slurm-gpu-notify · hourly · do not reply</div>
+</div>
+HTML
+} | "$SENDMAIL" -t
+
+cat "$TXT"
+rm -f "$TXT" "$ROWS"
