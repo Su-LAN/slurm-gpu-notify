@@ -1,0 +1,5 @@
+# Your personal config (account, ssh alias, email) — never commit this.
+config.local.sh
+
+# Slurm job logs if anyone runs scripts from inside the repo.
+*.log

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Remove the hourly report cron entry and the deployed script from the cluster.
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+
+RHOME="$(remote 'echo $HOME')"
+ssh -o BatchMode=yes "$SGN_SSH" bash -s <<EOS
+( crontab -l 2>/dev/null | grep -v sgn_gpu_report.sh ) | crontab - 2>/dev/null || true
+rm -f "$RHOME/sgn_gpu_report.sh"
+echo "Removed cron entry and $RHOME/sgn_gpu_report.sh"
+EOS

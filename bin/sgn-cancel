@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Cancel (release) a job. Usage: sgn-cancel <jobid>
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+JID="${1:?usage: sgn-cancel <jobid>}"
+remote "scancel $JID" && echo "cancelled job $JID"

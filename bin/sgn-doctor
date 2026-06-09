@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Pre-flight check: verifies SSH, slurm tools, mail, cron and nvidia-smi are all
+# reachable on the cluster with your config. Run this first after editing config.
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+
+echo "Config:"
+echo "  SGN_SSH=$SGN_SSH   SGN_EMAIL=$SGN_EMAIL"
+echo "  reservation='${SGN_RESERVATION}'  qos='${SGN_QOS}'  gres='${SGN_GRES}'  gpu_stat_via='$SGN_GPU_STAT_VIA'"
+echo
+
+echo -n "1) SSH (passwordless) ............. "
+remote 'echo OK on $(hostname)'
+
+echo -n "2) slurm binaries ................. "
+remote 'command -v sbatch squeue scontrol srun >/dev/null && echo OK || echo MISSING'
+
+echo -n "3) mail command ................... "
+remote 'command -v mail >/dev/null && echo OK || (command -v mailx >/dev/null && echo "OK (mailx)" || echo MISSING)'
+
+echo -n "4) cron daemon .................... "
+remote 'pgrep -x cron >/dev/null && echo running || (pgrep -x crond >/dev/null && echo running || echo NOT-RUNNING)'
+
+echo -n "5) nvidia-smi on login node ....... "
+remote 'command -v nvidia-smi >/dev/null && echo OK || echo "absent (use SGN_GPU_STAT_VIA=srun or none)"'
+
+echo
+echo "If all green, you are ready:  sgn-request   then   sgn-monitor-install"

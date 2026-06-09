@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Open an interactive shell INSIDE a running job (so you see only its GPU).
+# Usage: sgn-attach <jobid>
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+JID="${1:?usage: sgn-attach <jobid>}"
+exec ssh -t "$SGN_SSH" "$(sgn_path_prefix)srun --jobid=$JID --overlap --pty bash -l"

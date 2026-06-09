@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Print the same status report the hourly e-mail contains, right now, to stdout
+# (no e-mail sent). Works whether or not the monitor is installed.
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+render_report | ssh -o BatchMode=yes "$SGN_SSH" "SGN_NO_MAIL=1 bash -s"

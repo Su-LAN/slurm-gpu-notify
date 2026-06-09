@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Deploy the hourly e-mail status report ONTO the cluster and schedule it via
+# the user's crontab. Runs entirely on the cluster afterwards — independent of
+# your laptop being awake or online. Idempotent: re-running just refreshes it.
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+
+RHOME="$(remote 'echo $HOME')"
+SCRIPT_PATH="$RHOME/sgn_gpu_report.sh"
+
+echo "1/4  Checking cron daemon on $SGN_SSH ..."
+CRON_STATE="$(remote 'pgrep -x cron >/dev/null && echo running || (pgrep -x crond >/dev/null && echo running || echo NOT-RUNNING)')"
+echo "     cron: $CRON_STATE"
+[ "$CRON_STATE" = "running" ] || echo "     WARNING: no cron daemon detected — the schedule may not fire. Consider 'scrontab' (see README)."
+
+echo "2/4  Uploading report script -> $SCRIPT_PATH ..."
+render_report | ssh -o BatchMode=yes "$SGN_SSH" "cat > '$SCRIPT_PATH' && chmod +x '$SCRIPT_PATH'"
+
+echo "3/4  Installing crontab entry: $SGN_REPORT_CRON"
+ssh -o BatchMode=yes "$SGN_SSH" bash -s <<EOS
+set -e
+crontab -l 2>/dev/null | grep -v sgn_gpu_report.sh > /tmp/sgn_ct.\$\$ || true
+echo "$SGN_REPORT_CRON $SCRIPT_PATH >/dev/null 2>&1" >> /tmp/sgn_ct.\$\$
+crontab /tmp/sgn_ct.\$\$
+rm -f /tmp/sgn_ct.\$\$
+echo "     crontab now:"; crontab -l | grep sgn_gpu_report.sh | sed 's/^/       /'
+EOS
+
+echo "4/4  Sending one report now to verify e-mail delivery ..."
+ssh -o BatchMode=yes "$SGN_SSH" "'$SCRIPT_PATH'" >/dev/null
+echo "     sent to $SGN_EMAIL — check inbox (and spam) to confirm it arrives."
+echo
+echo "Done. Hourly reports are live on the cluster. Remove with: sgn-monitor-uninstall"

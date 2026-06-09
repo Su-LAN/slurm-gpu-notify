@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Request a GPU on the cluster as a Slurm job, with BEGIN/END/FAIL email alerts.
+# By default submits a "holding" job (allocates the GPU then `sleep infinity`)
+# that you attach to interactively; pass --cmd to run a real workload instead.
+#
+# Usage:
+#   sgn-request [--gres g] [--time D-HH:MM:SS] [--cpus n] [--mem 64G]
+#               [--name NAME] [--cmd 'srun python train.py']
+# Examples:
+#   sgn-request                                  # 1 GPU, defaults from config, holding
+#   sgn-request --gres gpu:a100_1g.20gb:1        # a 20GB MIG slice instead
+#   sgn-request --time 12:00:00 --cmd 'bash run.sh'
+set -euo pipefail
+. "$(dirname "$0")/common.sh"
+
+NAME="sgn_hold"; GRES="$SGN_GRES"; TIME="$SGN_TIME"; CPUS="$SGN_CPUS"; MEM="$SGN_MEM"; CMD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gres) GRES="$2"; shift 2;;
+    --time) TIME="$2"; shift 2;;
+    --cpus) CPUS="$2"; shift 2;;
+    --mem)  MEM="$2";  shift 2;;
+    --name) NAME="$2"; shift 2;;
+    --cmd)  CMD="$2";  shift 2;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0;;
+    *) echo "unknown argument: $1" >&2; exit 1;;
+  esac
+done
+
+PART_LINE=""; [ -n "$SGN_PARTITION" ]   && PART_LINE="#SBATCH --partition=$SGN_PARTITION"
+RES_LINE="";  [ -n "$SGN_RESERVATION" ] && RES_LINE="#SBATCH --reservation=$SGN_RESERVATION"
+QOS_LINE="";  [ -n "$SGN_QOS" ]         && QOS_LINE="#SBATCH --qos=$SGN_QOS"
+BODY='echo "holding allocation — attach with the srun line above"; sleep infinity'
+[ -n "$CMD" ] && BODY="$CMD"
+
+SCRIPT="$(cat <<EOF
+#!/bin/bash
+#SBATCH --job-name=$NAME
+$PART_LINE
+$RES_LINE
+$QOS_LINE
+#SBATCH --gres=$GRES
+#SBATCH --cpus-per-task=$CPUS
+#SBATCH --mem=$MEM
+#SBATCH --time=$TIME
+#SBATCH --output=%x_%j.log
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=$SGN_EMAIL
+
+echo "=== job \$SLURM_JOB_ID on \$(hostname) started \$(date) ==="
+echo "CUDA_VISIBLE_DEVICES=\$CUDA_VISIBLE_DEVICES"
+nvidia-smi -L 2>/dev/null
+echo "Attach: srun --jobid=\$SLURM_JOB_ID --overlap --pty bash -l"
+$BODY
+EOF
+)"
+
+JID="$(printf '%s\n' "$SCRIPT" | ssh -o BatchMode=yes "$SGN_SSH" "$(sgn_path_prefix)sbatch --parsable")"
+JID="${JID%%;*}"
+echo "Submitted job: $JID"
+echo "  gres=$GRES  time=$TIME  cpus=$CPUS  mem=$MEM" \
+     "${SGN_RESERVATION:+ reservation=$SGN_RESERVATION}${SGN_QOS:+ qos=$SGN_QOS}"
+echo "  Email BEGIN/END/FAIL -> $SGN_EMAIL"
+echo "  Status : sgn-status        Attach (once RUNNING): sgn-attach $JID"
+echo "  Cancel : sgn-cancel $JID"
