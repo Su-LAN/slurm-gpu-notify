@@ -31,6 +31,7 @@ SGN_MEM="${SGN_MEM:-64G}"
 SGN_TIME="${SGN_TIME:-1-00:00:00}"
 SGN_GPU_STAT_VIA="${SGN_GPU_STAT_VIA:-login_idx}"
 SGN_REPORT_CRON="${SGN_REPORT_CRON:-0 * * * *}"
+SGN_EMAIL_WHEN_EMPTY="${SGN_EMAIL_WHEN_EMPTY:-0}"
 
 # Prefix that puts the slurm bins on PATH for a remote NON-login shell.
 sgn_path_prefix() {
@@ -49,6 +50,7 @@ render_report() {
   [ -n "$SGN_SLURM_BIN" ] && pathline="export PATH=$SGN_SLURM_BIN:\$PATH"
   sed -e "s|@EMAIL@|$SGN_EMAIL|g" \
       -e "s|@GPU_STAT_VIA@|$SGN_GPU_STAT_VIA|g" \
+      -e "s|@EMAIL_WHEN_EMPTY@|$SGN_EMAIL_WHEN_EMPTY|g" \
       -e "s|@SLURM_PATH_LINE@|$pathline|g" \
       "$SGN_ROOT/remote/gpu_report.sh.tmpl"
 }

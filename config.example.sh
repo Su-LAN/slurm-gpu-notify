@@ -56,3 +56,7 @@ SGN_LOGIN_NODE="dgxlogin"          # informational; the node nvidia-smi runs on
 
 # Cron schedule for the hourly report (standard 5-field crontab spec).
 SGN_REPORT_CRON="0 * * * *"        # top of every hour
+
+# When you have NO jobs (nothing running or pending): 0 = stay silent (no email),
+# 1 = still send a "no jobs" heartbeat so you know the monitor is alive.
+SGN_EMAIL_WHEN_EMPTY="0"

@@ -11,6 +11,7 @@
 @SLURM_PATH_LINE@
 MAILTO="@EMAIL@"
 GPU_STAT_VIA="@GPU_STAT_VIA@"
+EMAIL_WHEN_EMPTY="@EMAIL_WHEN_EMPTY@"   # 1 = send a heartbeat even with no jobs; 0 = stay silent
 SENDMAIL="$(command -v sendmail 2>/dev/null || echo /usr/sbin/sendmail)"
 ME="$(whoami)"
 NOW="$(date '+%Y-%m-%d %H:%M %Z')"
@@ -112,6 +113,11 @@ echo "" >> "$TXT"; echo "— slurm-gpu-notify · hourly" >> "$TXT"
 # ---- output ----------------------------------------------------------------
 if [ -n "${SGN_NO_MAIL:-}" ]; then
   cat "$TXT"; rm -f "$TXT" "$ROWS"; exit 0
+fi
+
+# No jobs at all → stay silent (unless a heartbeat was explicitly requested).
+if [ -z "$JOBS" ] && [ "$EMAIL_WHEN_EMPTY" != "1" ]; then
+  rm -f "$TXT" "$ROWS"; exit 0
 fi
 
 if [ -n "$JOBS" ]; then
