@@ -5,6 +5,9 @@
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 
+SEND_TEST=1
+[ "${1:-}" = "--no-test" ] && SEND_TEST=0   # re-deploy quietly, no verification email
+
 RHOME="$(remote 'echo $HOME')"
 SCRIPT_PATH="$RHOME/sgn_gpu_report.sh"
 
@@ -26,8 +29,12 @@ rm -f /tmp/sgn_ct.\$\$
 echo "     crontab now:"; crontab -l | grep sgn_gpu_report.sh | sed 's/^/       /'
 EOS
 
-echo "4/4  Sending one report now to verify e-mail delivery ..."
-ssh -o BatchMode=yes "$SGN_SSH" "'$SCRIPT_PATH'" >/dev/null
-echo "     sent to $SGN_EMAIL — check inbox (and spam) to confirm it arrives."
+if [ "$SEND_TEST" = "1" ]; then
+  echo "4/4  Sending one report now to verify e-mail delivery ..."
+  ssh -o BatchMode=yes "$SGN_SSH" "'$SCRIPT_PATH'" >/dev/null
+  echo "     sent to $SGN_EMAIL — check inbox (and spam) to confirm it arrives."
+else
+  echo "4/4  Skipping verification e-mail (--no-test)."
+fi
 echo
 echo "Done. Hourly reports are live on the cluster. Remove with: sgn-monitor-uninstall"
